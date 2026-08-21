@@ -6157,9 +6157,22 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         state_db_last_message_at = entry.pop('_state_db_last_message_at', None)
         state_db_display_title = entry.pop('_state_db_display_title', None)
         if state_db_source in ('webui', 'subagent'):
+            # A WebUI-native /branch sidecar is the authoritative source for
+            # fork provenance. Its mirrored state.db row is intentionally
+            # generic ``source='webui'`` and cannot represent that distinction.
+            # Preserve the explicit marker when it has the required parent;
+            # otherwise keep the authoritative state.db normalization behavior,
+            # including delegated subagent classification.
+            preserve_native_fork = bool(
+                state_db_source == 'webui'
+                and str(session.get('session_source') or '').strip().lower() == 'fork'
+                and str(session.get('parent_session_id') or '').strip()
+            )
             session['source_tag'] = state_db_source_tag
             session['raw_source'] = state_db_raw_source
-            session['session_source'] = state_db_session_source
+            session['session_source'] = (
+                'fork' if preserve_native_fork else state_db_session_source
+            )
             session['source_label'] = state_db_source_label
             session['is_cli_session'] = False
             if state_db_source == 'subagent':
