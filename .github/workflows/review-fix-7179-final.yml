@@ -53,6 +53,12 @@ jobs:
           )
 
           replace_once(
+              'tests/test_gateway_sync.py',
+              "import urllib.request\n\nREPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()\n",
+              "import urllib.request\n\nimport pytest\n\nREPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()\n",
+          )
+
+          replace_once(
               'tests/test_session_lineage_collapse.py',
               "eval(extractFunc('_sessionTimestampMs'));\neval(extractFunc('_isChildSession'));\neval(extractFunc('_sessionLineageKey'));\neval(extractFunc('_sessionLineageContainsSession'));\neval(extractFunc('_sidebarLineageKeyForRow'));\neval(extractFunc('_collapseSessionLineageForSidebar'));\neval(extractFunc('_resolveSessionIdFromSidebarLineage'));\n",
               "eval(extractFunc('_sessionTimestampMs'));\neval(extractFunc('_isChildSession'));\neval(extractFunc('_isResetSuccessor'));\neval(extractFunc('_sessionLineageKey'));\neval(extractFunc('_sessionLineageContainsSession'));\neval(extractFunc('_sidebarLineageKeyForRow'));\neval(extractFunc('_collapseSessionLineageForSidebar'));\neval(extractFunc('_resolveSessionIdFromSidebarLineage'));\n",
