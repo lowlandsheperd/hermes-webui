@@ -1,0 +1,185 @@
+name: Temporary PR 7179 final gate fix
+
+on:
+  push:
+    branches:
+      - fix/reset-lineage-final-gate-review
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: fix/reset-lineage-final-gate-review
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Apply final gate fixes and regression coverage
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one match, found {count}: {old[:160]!r}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # Backend parity: mirror the Agent-owned six reset end reasons.
+          replace_once(
+              'api/agent_sessions.py',
+              "    'resume_pending_expired',\n})\n",
+              "    'resume_pending_expired',\n    'session_switch',\n})\n",
+          )
+
+          # Navigation identity: reset parent_session_id is durable ancestry, not an alias.
+          replace_once(
+              'static/sessions.js',
+              "    if(key===sid||row.parent_session_id===sid||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){\n",
+              "    if(key===sid||(!_isResetSuccessor(row)&&row.parent_session_id===sid)||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){\n",
+          )
+
+          # Existing resolver test now needs the reset-successor helper in scope.
+          replace_once(
+              'tests/test_session_lineage_collapse.py',
+              "eval(extractFunc('_sessionTimestampMs'));\neval(extractFunc('_isChildSession'));\neval(extractFunc('_sessionLineageKey'));\neval(extractFunc('_sessionLineageContainsSession'));\neval(extractFunc('_sidebarLineageKeyForRow'));\neval(extractFunc('_collapseSessionLineageForSidebar'));\neval(extractFunc('_resolveSessionIdFromSidebarLineage'));\n",
+              "eval(extractFunc('_sessionTimestampMs'));\neval(extractFunc('_isChildSession'));\neval(extractFunc('_isResetSuccessor'));\neval(extractFunc('_sessionLineageKey'));\neval(extractFunc('_sessionLineageContainsSession'));\neval(extractFunc('_sidebarLineageKeyForRow'));\neval(extractFunc('_collapseSessionLineageForSidebar'));\neval(extractFunc('_resolveSessionIdFromSidebarLineage'));\n",
+          )
+
+          # Focused resolver matrix requested by the exact-head re-gate.
+          anchor = "\n\ndef test_sidebar_attaches_child_sessions_to_collapsed_hidden_parent_lineage():\n"
+          new_test = r'''
+
+
+def test_reset_successor_parent_link_is_not_navigation_alias():
+    """Reset ancestry must not alias the old parent while compression still resolves."""
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _allSessions = [
+  {{session_id:'reset-child', title:'Reset child', parent_session_id:'hidden-reset-parent', relationship_type:'reset_successor', _lineage_root_id:'reset-child', updated_at:150, last_message_at:150}},
+  {{session_id:'reset-root', title:'Compressed reset root', parent_session_id:'older-reset-parent', relationship_type:'reset_successor', _lineage_root_id:'reset-root', _compression_segment_count:1, updated_at:100, last_message_at:100}},
+  {{session_id:'reset-tip', title:'Compressed reset root', parent_session_id:'reset-root', _lineage_root_id:'reset-root', _compression_segment_count:2, updated_at:200, last_message_at:200}},
+  {{session_id:'ordinary-tip', title:'Ordinary compressed chat', parent_session_id:'ordinary-parent', _lineage_root_id:'ordinary-parent', _compression_segment_count:2, updated_at:180, last_message_at:180}},
+];
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isResetSuccessor'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sessionLineageContainsSession'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_resolveSessionIdFromSidebarLineage'));
+console.log(JSON.stringify({{
+  hiddenResetParent: _resolveSessionIdFromSidebarLineage('hidden-reset-parent'),
+  compressedResetRoot: _resolveSessionIdFromSidebarLineage('reset-root'),
+  directResetTip: _resolveSessionIdFromSidebarLineage('reset-tip'),
+  ordinaryCompressionParent: _resolveSessionIdFromSidebarLineage('ordinary-parent'),
+}}));
+"""
+    assert json.loads(_run_node(source)) == {
+        "hiddenResetParent": "hidden-reset-parent",
+        "compressedResetRoot": "reset-tip",
+        "directResetTip": "reset-tip",
+        "ordinaryCompressionParent": "ordinary-tip",
+    }
+'''
+          replace_once(
+              'tests/test_session_lineage_collapse.py',
+              anchor,
+              new_test + anchor,
+          )
+
+          # Low-level projection: cover markerless same-key session_switch reset rows.
+          replace_once(
+              'tests/test_session_lineage_metadata_api.py',
+              "    base_child = {\n        'source': 'wecom',\n        'parent_session_id': parent['id'],\n        'session_key': 'same-messaging-identity',\n        'actual_message_count': 2,\n        'started_at': 2,\n    }\n    rows = [\n        parent,\n        {**base_child, 'id': 'projection_legacy_reset'},\n",
+              "    switch_parent = {\n        **parent,\n        'id': 'projection_switch_parent',\n        'end_reason': 'session_switch',\n    }\n    base_child = {\n        'source': 'wecom',\n        'parent_session_id': parent['id'],\n        'session_key': 'same-messaging-identity',\n        'actual_message_count': 2,\n        'started_at': 2,\n    }\n    switch_child = {\n        **base_child,\n        'id': 'projection_session_switch_reset',\n        'parent_session_id': switch_parent['id'],\n    }\n    rows = [\n        parent,\n        switch_parent,\n        {**base_child, 'id': 'projection_legacy_reset'},\n        switch_child,\n",
+          )
+          replace_once(
+              'tests/test_session_lineage_metadata_api.py',
+              "    for sid in ('projection_legacy_reset', 'projection_orphan_canonical_reset'):\n        assert projected[sid].get('relationship_type') == 'reset_successor'\n        assert projected[sid].get('_lineage_root_id') == sid\n",
+              "    for sid in (\n        'projection_legacy_reset',\n        'projection_session_switch_reset',\n        'projection_orphan_canonical_reset',\n    ):\n        assert projected[sid].get('relationship_type') == 'reset_successor'\n        assert projected[sid].get('_lineage_root_id') == sid\n        for key in (\n            'parent_title',\n            'parent_source',\n            '_parent_lineage_root_id',\n            '_parent_lineage_tip_id',\n        ):\n            assert key not in projected[sid]\n",
+          )
+
+          # Production-shaped /api/sessions test: canonical marker + legacy session_switch fallback.
+          replace_once(
+              'tests/test_gateway_sync.py',
+              "def test_sessions_route_keeps_reset_successor_top_level(cleanup_test_sessions):\n",
+              "@pytest.mark.parametrize(\n    ('end_reason', 'canonical_marker'),\n    [('session_reset', True), ('session_switch', False)],\n)\ndef test_sessions_route_keeps_reset_successor_top_level(\n    cleanup_test_sessions, end_reason, canonical_marker\n):\n",
+          )
+          replace_once(
+              'tests/test_gateway_sync.py',
+              "    parent_sid = 'reset_lineage_parent_7178'\n    child_sid = 'reset_lineage_child_7178'\n",
+              "    parent_sid = f'reset_lineage_parent_7178_{end_reason}'\n    child_sid = f'reset_lineage_child_7178_{end_reason}'\n",
+          )
+          replace_once(
+              'tests/test_gateway_sync.py',
+              "            end_reason='session_reset',\n",
+              "            end_reason=end_reason,\n",
+          )
+          replace_once(
+              'tests/test_gateway_sync.py',
+              "            model_config={'_reset_from': parent_sid},\n",
+              "            model_config=({'_reset_from': parent_sid} if canonical_marker else None),\n",
+          )
+          PY
+
+      - name: Install targeted test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio ruff
+
+      - name: Syntax and diff checks
+        run: |
+          python -m compileall -q api tests
+          node --check static/sessions.js
+          git diff --check
+          python scripts/ruff_lint.py --diff origin/master
+
+      - name: Run reset-lineage regression suite
+        run: |
+          pytest -q --timeout=60 \
+            tests/test_gateway_sync.py \
+            tests/test_session_lineage_metadata_api.py \
+            tests/test_session_lineage_report.py \
+            tests/test_session_lineage_collapse.py
+
+      - name: Commit validated patch and remove temporary workflow
+        run: |
+          rm .github/workflows/review-fix-7179-final.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add api/agent_sessions.py static/sessions.js \
+            tests/test_gateway_sync.py tests/test_session_lineage_metadata_api.py \
+            tests/test_session_lineage_collapse.py \
+            .github/workflows/review-fix-7179-final.yml
+          git commit -m "fix(sessions): preserve reset navigation semantics"
+          git push origin HEAD:fix/reset-lineage-final-gate-review
