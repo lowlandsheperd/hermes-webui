@@ -29,6 +29,7 @@ jobs:
       - name: Apply final gate fixes and regression coverage
         run: |
           python - <<'PY'
+          import base64
           from pathlib import Path
 
           def replace_once(path, old, new):
@@ -39,85 +40,32 @@ jobs:
                   raise SystemExit(f'{path}: expected one match, found {count}: {old[:160]!r}')
               p.write_text(text.replace(old, new, 1), encoding='utf-8')
 
-          # Backend parity: mirror the Agent-owned six reset end reasons.
           replace_once(
               'api/agent_sessions.py',
               "    'resume_pending_expired',\n})\n",
               "    'resume_pending_expired',\n    'session_switch',\n})\n",
           )
 
-          # Navigation identity: reset parent_session_id is durable ancestry, not an alias.
           replace_once(
               'static/sessions.js',
               "    if(key===sid||row.parent_session_id===sid||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){\n",
               "    if(key===sid||(!_isResetSuccessor(row)&&row.parent_session_id===sid)||row._lineage_root_id===sid||row.lineage_root_id===sid||_sessionLineageContainsSession(row,sid)){\n",
           )
 
-          # Existing resolver test now needs the reset-successor helper in scope.
           replace_once(
               'tests/test_session_lineage_collapse.py',
               "eval(extractFunc('_sessionTimestampMs'));\neval(extractFunc('_isChildSession'));\neval(extractFunc('_sessionLineageKey'));\neval(extractFunc('_sessionLineageContainsSession'));\neval(extractFunc('_sidebarLineageKeyForRow'));\neval(extractFunc('_collapseSessionLineageForSidebar'));\neval(extractFunc('_resolveSessionIdFromSidebarLineage'));\n",
               "eval(extractFunc('_sessionTimestampMs'));\neval(extractFunc('_isChildSession'));\neval(extractFunc('_isResetSuccessor'));\neval(extractFunc('_sessionLineageKey'));\neval(extractFunc('_sessionLineageContainsSession'));\neval(extractFunc('_sidebarLineageKeyForRow'));\neval(extractFunc('_collapseSessionLineageForSidebar'));\neval(extractFunc('_resolveSessionIdFromSidebarLineage'));\n",
           )
 
-          # Focused resolver matrix requested by the exact-head re-gate.
           anchor = "\n\ndef test_sidebar_attaches_child_sessions_to_collapsed_hidden_parent_lineage():\n"
-          new_test = r'''
-
-
-def test_reset_successor_parent_link_is_not_navigation_alias():
-    """Reset ancestry must not alias the old parent while compression still resolves."""
-    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
-    source = f"""
-const src = {js!r};
-function extractFunc(name) {{
-  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
-  const start = src.search(re);
-  if (start < 0) throw new Error(name + ' not found');
-  let i = src.indexOf('{{', start);
-  let depth = 1; i++;
-  while (depth > 0 && i < src.length) {{
-    if (src[i] === '{{') depth++;
-    else if (src[i] === '}}') depth--;
-    i++;
-  }}
-  return src.slice(start, i);
-}}
-var _allSessions = [
-  {{session_id:'reset-child', title:'Reset child', parent_session_id:'hidden-reset-parent', relationship_type:'reset_successor', _lineage_root_id:'reset-child', updated_at:150, last_message_at:150}},
-  {{session_id:'reset-root', title:'Compressed reset root', parent_session_id:'older-reset-parent', relationship_type:'reset_successor', _lineage_root_id:'reset-root', _compression_segment_count:1, updated_at:100, last_message_at:100}},
-  {{session_id:'reset-tip', title:'Compressed reset root', parent_session_id:'reset-root', _lineage_root_id:'reset-root', _compression_segment_count:2, updated_at:200, last_message_at:200}},
-  {{session_id:'ordinary-tip', title:'Ordinary compressed chat', parent_session_id:'ordinary-parent', _lineage_root_id:'ordinary-parent', _compression_segment_count:2, updated_at:180, last_message_at:180}},
-];
-eval(extractFunc('_sessionTimestampMs'));
-eval(extractFunc('_isChildSession'));
-eval(extractFunc('_isResetSuccessor'));
-eval(extractFunc('_sessionLineageKey'));
-eval(extractFunc('_sessionLineageContainsSession'));
-eval(extractFunc('_sidebarLineageKeyForRow'));
-eval(extractFunc('_collapseSessionLineageForSidebar'));
-eval(extractFunc('_resolveSessionIdFromSidebarLineage'));
-console.log(JSON.stringify({{
-  hiddenResetParent: _resolveSessionIdFromSidebarLineage('hidden-reset-parent'),
-  compressedResetRoot: _resolveSessionIdFromSidebarLineage('reset-root'),
-  directResetTip: _resolveSessionIdFromSidebarLineage('reset-tip'),
-  ordinaryCompressionParent: _resolveSessionIdFromSidebarLineage('ordinary-parent'),
-}}));
-"""
-    assert json.loads(_run_node(source)) == {
-        "hiddenResetParent": "hidden-reset-parent",
-        "compressedResetRoot": "reset-tip",
-        "directResetTip": "reset-tip",
-        "ordinaryCompressionParent": "ordinary-tip",
-    }
-'''
+          new_test = base64.b64decode('CgpkZWYgdGVzdF9yZXNldF9zdWNjZXNzb3JfcGFyZW50X2xpbmtfaXNfbm90X25hdmlnYXRpb25fYWxpYXMoKToKICAgICIiIlJlc2V0IGFuY2VzdHJ5IG11c3Qgbm90IGFsaWFzIHRoZSBvbGQgcGFyZW50IHdoaWxlIGNvbXByZXNzaW9uIHN0aWxsIHJlc29sdmVzLiIiIgogICAganMgPSBTRVNTSU9OU19KU19QQVRILnJlYWRfdGV4dChlbmNvZGluZz0idXRmLTgiKQogICAgc291cmNlID0gZiIiIgpjb25zdCBzcmMgPSB7anMhcn07CmZ1bmN0aW9uIGV4dHJhY3RGdW5jKG5hbWUpIHt7CiAgY29uc3QgcmUgPSBuZXcgUmVnRXhwKCdmdW5jdGlvblxcXFxzKycgKyBuYW1lICsgJ1xcXFxzKlxcXFwoJyk7CiAgY29uc3Qgc3RhcnQgPSBzcmMuc2VhcmNoKHJlKTsKICBpZiAoc3RhcnQgPCAwKSB0aHJvdyBuZXcgRXJyb3IobmFtZSArICcgbm90IGZvdW5kJyk7CiAgbGV0IGkgPSBzcmMuaW5kZXhPZigne3snLCBzdGFydCk7CiAgbGV0IGRlcHRoID0gMTsgaSsrOwogIHdoaWxlIChkZXB0aCA+IDAgJiYgaSA8IHNyYy5sZW5ndGgpIHt7CiAgICBpZiAoc3JjW2ldID09PSAne3snKSBkZXB0aCsrOwogICAgZWxzZSBpZiAoc3JjW2ldID09PSAnfX0nKSBkZXB0aC0tOwogICAgaSsrOwogIH19CiAgcmV0dXJuIHNyYy5zbGljZShzdGFydCwgaSk7Cn19CnZhciBfYWxsU2Vzc2lvbnMgPSBbCiAge3tzZXNzaW9uX2lkOidyZXNldC1jaGlsZCcsIHRpdGxlOidSZXNldCBjaGlsZCcsIHBhcmVudF9zZXNzaW9uX2lkOidoaWRkZW4tcmVzZXQtcGFyZW50JywgcmVsYXRpb25zaGlwX3R5cGU6J3Jlc2V0X3N1Y2Nlc3NvcicsIF9saW5lYWdlX3Jvb3RfaWQ6J3Jlc2V0LWNoaWxkJywgdXBkYXRlZF9hdDoxNTAsIGxhc3RfbWVzc2FnZV9hdDoxNTB9fSwKICB7e3Nlc3Npb25faWQ6J3Jlc2V0LXJvb3QnLCB0aXRsZTonQ29tcHJlc3NlZCByZXNldCByb290JywgcGFyZW50X3Nlc3Npb25faWQ6J29sZGVyLXJlc2V0LXBhcmVudCcsIHJlbGF0aW9uc2hpcF90eXBlOidyZXNldF9zdWNjZXNzb3InLCBfbGluZWFnZV9yb290X2lkOidyZXNldC1yb290JywgX2NvbXByZXNzaW9uX3NlZ21lbnRfY291bnQ6MSwgdXBkYXRlZF9hdDoxMDAsIGxhc3RfbWVzc2FnZV9hdDoxMDB9fSwKICB7e3Nlc3Npb25faWQ6J3Jlc2V0LXRpcCcsIHRpdGxlOidDb21wcmVzc2VkIHJlc2V0IHJvb3QnLCBwYXJlbnRfc2Vzc2lvbl9pZDoncmVzZXQtcm9vdCcsIF9saW5lYWdlX3Jvb3RfaWQ6J3Jlc2V0LXJvb3QnLCBfY29tcHJlc3Npb25fc2VnbWVudF9jb3VudDoyLCB1cGRhdGVkX2F0OjIwMCwgbGFzdF9tZXNzYWdlX2F0OjIwMH19LAogIHt7c2Vzc2lvbl9pZDonb3JkaW5hcnktdGlwJywgdGl0bGU6J09yZGluYXJ5IGNvbXByZXNzZWQgY2hhdCcsIHBhcmVudF9zZXNzaW9uX2lkOidvcmRpbmFyeS1wYXJlbnQnLCBfbGluZWFnZV9yb290X2lkOidvcmRpbmFyeS1wYXJlbnQnLCBfY29tcHJlc3Npb25fc2VnbWVudF9jb3VudDoyLCB1cGRhdGVkX2F0OjE4MCwgbGFzdF9tZXNzYWdlX2F0OjE4MH19LApdOwpldmFsKGV4dHJhY3RGdW5jKCdfc2Vzc2lvblRpbWVzdGFtcE1zJykpOwpldmFsKGV4dHJhY3RGdW5jKCdfaXNDaGlsZFNlc3Npb24nKSk7CmV2YWwoZXh0cmFjdEZ1bmMoJ19pc1Jlc2V0U3VjY2Vzc29yJykpOwpldmFsKGV4dHJhY3RGdW5jKCdfc2Vzc2lvbkxpbmVhZ2VLZXknKSk7CmV2YWwoZXh0cmFjdEZ1bmMoJ19zZXNzaW9uTGluZWFnZUNvbnRhaW5zU2Vzc2lvbicpKTsKZXZhbChleHRyYWN0RnVuYygnX3NpZGViYXJMaW5lYWdlS2V5Rm9yUm93JykpOwpldmFsKGV4dHJhY3RGdW5jKCdfY29sbGFwc2VTZXNzaW9uTGluZWFnZUZvclNpZGViYXInKSk7CmV2YWwoZXh0cmFjdEZ1bmMoJ19yZXNvbHZlU2Vzc2lvbklkRnJvbVNpZGViYXJMaW5lYWdlJykpOwpjb25zb2xlLmxvZyhKU09OLnN0cmluZ2lmeSh7ewogIGhpZGRlblJlc2V0UGFyZW50OiBfcmVzb2x2ZVNlc3Npb25JZEZyb21TaWRlYmFyTGluZWFnZSgnaGlkZGVuLXJlc2V0LXBhcmVudCcpLAogIGNvbXByZXNzZWRSZXNldFJvb3Q6IF9yZXNvbHZlU2Vzc2lvbklkRnJvbVNpZGViYXJMaW5lYWdlKCdyZXNldC1yb290JyksCiAgZGlyZWN0UmVzZXRUaXA6IF9yZXNvbHZlU2Vzc2lvbklkRnJvbVNpZGViYXJMaW5lYWdlKCdyZXNldC10aXAnKSwKICBvcmRpbmFyeUNvbXByZXNzaW9uUGFyZW50OiBfcmVzb2x2ZVNlc3Npb25JZEZyb21TaWRlYmFyTGluZWFnZSgnb3JkaW5hcnktcGFyZW50JyksCn19KSk7CiIiIgogICAgYXNzZXJ0IGpzb24ubG9hZHMoX3J1bl9ub2RlKHNvdXJjZSkpID09IHsKICAgICAgICAiaGlkZGVuUmVzZXRQYXJlbnQiOiAiaGlkZGVuLXJlc2V0LXBhcmVudCIsCiAgICAgICAgImNvbXByZXNzZWRSZXNldFJvb3QiOiAicmVzZXQtdGlwIiwKICAgICAgICAiZGlyZWN0UmVzZXRUaXAiOiAicmVzZXQtdGlwIiwKICAgICAgICAib3JkaW5hcnlDb21wcmVzc2lvblBhcmVudCI6ICJvcmRpbmFyeS10aXAiLAogICAgfQo=').decode('utf-8')
           replace_once(
               'tests/test_session_lineage_collapse.py',
               anchor,
               new_test + anchor,
           )
 
-          # Low-level projection: cover markerless same-key session_switch reset rows.
           replace_once(
               'tests/test_session_lineage_metadata_api.py',
               "    base_child = {\n        'source': 'wecom',\n        'parent_session_id': parent['id'],\n        'session_key': 'same-messaging-identity',\n        'actual_message_count': 2,\n        'started_at': 2,\n    }\n    rows = [\n        parent,\n        {**base_child, 'id': 'projection_legacy_reset'},\n",
@@ -129,7 +77,6 @@ console.log(JSON.stringify({{
               "    for sid in (\n        'projection_legacy_reset',\n        'projection_session_switch_reset',\n        'projection_orphan_canonical_reset',\n    ):\n        assert projected[sid].get('relationship_type') == 'reset_successor'\n        assert projected[sid].get('_lineage_root_id') == sid\n        for key in (\n            'parent_title',\n            'parent_source',\n            '_parent_lineage_root_id',\n            '_parent_lineage_tip_id',\n        ):\n            assert key not in projected[sid]\n",
           )
 
-          # Production-shaped /api/sessions test: canonical marker + legacy session_switch fallback.
           replace_once(
               'tests/test_gateway_sync.py',
               "def test_sessions_route_keeps_reset_successor_top_level(cleanup_test_sessions):\n",
