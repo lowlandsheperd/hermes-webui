@@ -36,71 +36,67 @@ jobs:
               text = p.read_text(encoding='utf-8')
               count = text.count(old)
               if count != 1:
-                  raise SystemExit(f'{path}: expected one match, found {count}: {old[:100]!r}')
+                  raise SystemExit(f'{path}: expected one match, found {count}: {old[:140]!r}')
               p.write_text(text.replace(old, new, 1), encoding='utf-8')
 
-          # Backend: use an explicit positive relationship marker that already
-          # survives every state.db/sidebar adapter, and make the reset successor
-          # its own visible lineage root despite the durable parent link.
-          replace_once(
-              'api/agent_sessions.py',
-              """        if _is_user_visible_reset_successor(parent, row):
-              row['_reset_successor'] = True
-              continue
-          """,
-              """        if _is_user_visible_reset_successor(parent, row):
-              row['relationship_type'] = 'reset_successor'
-              row['_lineage_root_id'] = row['id']
-              continue
-          """,
-          )
-          replace_once(
-              'api/agent_sessions.py',
-              """            if is_reset_successor:
-                  entry['_reset_successor'] = True
-                  continue
-          """,
-              """            if is_reset_successor:
-                  entry['relationship_type'] = 'reset_successor'
-                  entry['_lineage_root_id'] = sid
-                  continue
-          """,
-          )
+          def replace_lines(path, old_lines, new_lines):
+              replace_once(path, '\n'.join(old_lines) + '\n', '\n'.join(new_lines) + '\n')
 
-          # Frontend: preserve the historical parent-linked indicator by default.
-          # Only a positively classified reset successor suppresses it, so legacy
-          # /branch rows created before session_source='fork' existed stay visible.
-          replace_once(
-              'static/sessions.js',
-              """function _showsForkOrBranchIndicator(s){
-            return !!(s&&s.parent_session_id&&(s.session_source==='fork'||s.relationship_type==='child_session'));
-          }
-          """,
-              """function _isResetSuccessor(s){
-            return !!(s&&s.relationship_type==='reset_successor');
-          }
+          # Backend: use a positive reset-successor relationship marker that is
+          # already transported by both state.db-only and JSON-enriched adapters.
+          # The self lineage root prevents the durable parent from being treated
+          # as the visible conversation root by server or client helpers.
+          replace_lines('api/agent_sessions.py', [
+              "        if _is_user_visible_reset_successor(parent, row):",
+              "            row['_reset_successor'] = True",
+              "            continue",
+          ], [
+              "        if _is_user_visible_reset_successor(parent, row):",
+              "            row['relationship_type'] = 'reset_successor'",
+              "            row['_lineage_root_id'] = row['id']",
+              "            continue",
+          ])
+          replace_lines('api/agent_sessions.py', [
+              "            if is_reset_successor:",
+              "                entry['_reset_successor'] = True",
+              "                continue",
+          ], [
+              "            if is_reset_successor:",
+              "                entry['relationship_type'] = 'reset_successor'",
+              "                entry['_lineage_root_id'] = sid",
+              "                continue",
+          ])
 
-          function _showsForkOrBranchIndicator(s){
-            return !!(s&&s.parent_session_id&&!_isResetSuccessor(s));
-          }
-          """,
-          )
-          replace_once(
-              'static/sessions.js',
-              """    // Reset successors retain parent_session_id as durable lineage but are
-              // independent top-level conversations. Only real forks/children get the
-              // fork indicator and its \"Forked from\" tooltip (#7178).
-          """,
-              """    // Reset successors retain parent_session_id as durable lineage but are
-              // independent top-level conversations. Suppress the historical parent-linked
-              // branch indicator only for a positively classified reset successor so legacy
-              // /branch rows without modern fork metadata keep their provenance (#7178).
-          """,
-          )
+          # Frontend: historical behavior is the compatibility default. Any
+          # parent-linked row keeps the fork/branch indicator unless the backend
+          # positively classified that row as a reset successor.
+          replace_lines('static/sessions.js', [
+              "function _showsForkOrBranchIndicator(s){",
+              "  return !!(s&&s.parent_session_id&&(s.session_source==='fork'||s.relationship_type==='child_session'));",
+              "}",
+          ], [
+              "function _isResetSuccessor(s){",
+              "  return !!(s&&s.relationship_type==='reset_successor');",
+              "}",
+              "",
+              "function _showsForkOrBranchIndicator(s){",
+              "  return !!(s&&s.parent_session_id&&!_isResetSuccessor(s));",
+              "}",
+          ])
+          replace_lines('static/sessions.js', [
+              "    // Reset successors retain parent_session_id as durable lineage but are",
+              "    // independent top-level conversations. Only real forks/children get the",
+              "    // fork indicator and its \"Forked from\" tooltip (#7178).",
+          ], [
+              "    // Reset successors retain parent_session_id as durable lineage but are",
+              "    // independent top-level conversations. Suppress the historical parent-linked",
+              "    // branch indicator only for a positively classified reset successor so legacy",
+              "    // /branch rows without modern fork metadata keep their provenance (#7178).",
+          ])
 
-          # JS behavior regression: reset is the sole parent-linked exception;
-          # modern forks, legacy generic-WebUI forks, ordinary children, and
-          # unknown/unmarked parent-linked rows retain their indicator.
+          # Frontend behavior regression: explicit reset is the sole parent-linked
+          # exception. Modern fork, legacy generic-WebUI fork, ordinary child, and
+          # an unknown/unmarked parent-linked row all retain the historical icon.
           replace_once(
               'tests/test_session_lineage_collapse.py',
               "eval(extractFunc('_showsForkOrBranchIndicator'));\n",
@@ -127,81 +123,71 @@ jobs:
               '    assert result == {"reset": False, "fork": True, "legacyFork": True, "child": True, "unmarkedParent": True, "topLevel": False}\n',
           )
 
-          # State.db-only route: the positive marker and self-root must survive
-          # adaptation to the public sidebar shape; child-only metadata stays absent.
-          replace_once(
-              'tests/test_gateway_sync.py',
-              """        assert child.get('parent_session_id') == parent_sid
-              for key in (
-                  'relationship_type',
-                  'parent_title',
-          """,
-              """        assert child.get('parent_session_id') == parent_sid
-              assert child.get('relationship_type') == 'reset_successor'
-              assert child.get('_lineage_root_id') == child_sid
-              for key in (
-                  'parent_title',
-          """,
-          )
+          # state.db-only /api/sessions path: marker and self-root must survive
+          # adaptation while real child-only metadata remains absent.
+          replace_lines('tests/test_gateway_sync.py', [
+              "        assert child.get('parent_session_id') == parent_sid",
+              "        for key in (",
+              "            'relationship_type',",
+              "            'parent_title',",
+          ], [
+              "        assert child.get('parent_session_id') == parent_sid",
+              "        assert child.get('relationship_type') == 'reset_successor'",
+              "        assert child.get('_lineage_root_id') == child_sid",
+              "        for key in (",
+              "            'parent_title',",
+          ])
 
-          # JSON-enriched route and low-level projection carry the same marker.
-          replace_once(
-              'tests/test_session_lineage_metadata_api.py',
-              """        assert child.get('parent_session_id') == parent_sid
-              for key in (
-                  'relationship_type',
-                  'parent_title',
-          """,
-              """        assert child.get('parent_session_id') == parent_sid
-              assert child.get('relationship_type') == 'reset_successor'
-              assert child.get('_lineage_root_id') == child_sid
-              for key in (
-                  'parent_title',
-          """,
-          )
-          replace_once(
-              'tests/test_session_lineage_metadata_api.py',
-              """    assert 'relationship_type' not in projected['projection_legacy_reset']
-              assert 'relationship_type' not in projected['projection_orphan_canonical_reset']
-              for sid in (
-          """,
-              """    for sid in ('projection_legacy_reset', 'projection_orphan_canonical_reset'):
-              assert projected[sid].get('relationship_type') == 'reset_successor'
-              assert projected[sid].get('_lineage_root_id') == sid
-              for sid in (
-          """,
-          )
-          replace_once(
-              'tests/test_session_lineage_metadata_api.py',
-              """    ):
-              assert projected[sid].get('relationship_type') == 'child_session'
+          # JSON-enriched path uses the exact same marker/root contract.
+          replace_lines('tests/test_session_lineage_metadata_api.py', [
+              "        assert child.get('parent_session_id') == parent_sid",
+              "        for key in (",
+              "            'relationship_type',",
+              "            'parent_title',",
+          ], [
+              "        assert child.get('parent_session_id') == parent_sid",
+              "        assert child.get('relationship_type') == 'reset_successor'",
+              "        assert child.get('_lineage_root_id') == child_sid",
+              "        for key in (",
+              "            'parent_title',",
+          ])
+          replace_lines('tests/test_session_lineage_metadata_api.py', [
+              "    assert 'relationship_type' not in projected['projection_legacy_reset']",
+              "    assert 'relationship_type' not in projected['projection_orphan_canonical_reset']",
+              "    for sid in (",
+          ], [
+              "    for sid in ('projection_legacy_reset', 'projection_orphan_canonical_reset'):",
+              "        assert projected[sid].get('relationship_type') == 'reset_successor'",
+              "        assert projected[sid].get('_lineage_root_id') == sid",
+              "    for sid in (",
+          ])
+          replace_lines('tests/test_session_lineage_metadata_api.py', [
+              "    for sid in (",
+              "        'projection_delegate',",
+              "        'projection_mismatched_reset',",
+              "        'projection_invalid_config',",
+              "    ):",
+              "        assert projected[sid].get('relationship_type') == 'child_session'",
+          ], [
+              "    for sid in (",
+              "        'projection_delegate',",
+              "        'projection_mismatched_reset',",
+              "        'projection_invalid_config',",
+              "    ):",
+              "        assert projected[sid].get('relationship_type') == 'child_session'",
+              "        assert '_lineage_root_id' not in projected[sid]",
+          ])
 
-
-          def test_child_of_hidden_compression_segment_exposes_parent_lineage_root(_isolate):
-          """,
-              """    ):
-              assert projected[sid].get('relationship_type') == 'child_session'
-              assert '_lineage_root_id' not in projected[sid]
-
-
-          def test_child_of_hidden_compression_segment_exposes_parent_lineage_root(_isolate):
-          """,
-          )
-
-          # Document the explicit projection contract so future code does not
-          # regress back to inferring reset state from missing modern fork metadata.
-          replace_once(
-              'docs/rfcs/canonical-session-resolution.md',
-              """top-level conversation, even when Hermes Agent retains `parent_session_id` as
-          durable reset lineage. Sidebar projection must preserve that identifier without
-          emitting child-session metadata for a reset successor. Compression
-          """,
-              """top-level conversation, even when Hermes Agent retains `parent_session_id` as
-          durable reset lineage. Sidebar projection must preserve that identifier and mark
-          the exception explicitly as `relationship_type='reset_successor'` without
-          emitting child-session metadata for a reset successor. Compression
-          """,
-          )
+          replace_lines('docs/rfcs/canonical-session-resolution.md', [
+              "top-level conversation, even when Hermes Agent retains `parent_session_id` as",
+              "durable reset lineage. Sidebar projection must preserve that identifier without",
+              "emitting child-session metadata for a reset successor. Compression",
+          ], [
+              "top-level conversation, even when Hermes Agent retains `parent_session_id` as",
+              "durable reset lineage. Sidebar projection must preserve that identifier and mark",
+              "the exception explicitly as `relationship_type='reset_successor'` without",
+              "emitting child-session metadata for a reset successor. Compression",
+          ])
           PY
 
       - name: Install targeted test dependencies
