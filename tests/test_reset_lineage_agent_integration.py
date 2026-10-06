@@ -148,6 +148,7 @@ def real_agent_scenarios(tmp_path_factory):
         "HOME": str(home),
         "HERMES_HOME": str(home),
         "HERMES_BASE_HOME": str(home),
+        "HERMES_DISABLE_LAZY_INSTALLS": "1",
         "HERMES_CONFIG_PATH": str(home / "config.yaml"),
         "HERMES_WEBUI_STATE_DIR": str(home / "webui"),
         "HERMES_WEBUI_AGENT_DIR": str(agent_dir),

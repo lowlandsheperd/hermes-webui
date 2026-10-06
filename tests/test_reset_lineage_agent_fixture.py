@@ -36,7 +36,11 @@ def test_opted_in_fixture_failure_is_error_not_xfail(tmp_path, failure, diagnost
     if failure != "agent_dir":
         # Deliberately broken imports/output test the harness only. No real
         # Agent checkout or Agent dependency installation is needed in CI.
-        source = "import missing_reset_lineage_dependency\n"
+        source = (
+            "import os\n"
+            "assert os.environ.get('HERMES_DISABLE_LAZY_INSTALLS') == '1', 'lazy installs not disabled'\n"
+            "import missing_reset_lineage_dependency\n"
+        )
         if failure == "probe_output":
             source = "print('not probe JSON')\nraise SystemExit(0)\n"
         (agent_dir / "hermes_state.py").write_text(source, encoding="utf-8")
@@ -47,6 +51,7 @@ def test_opted_in_fixture_failure_is_error_not_xfail(tmp_path, failure, diagnost
         "HOME": str(home),
         "HERMES_HOME": str(home),
         "HERMES_BASE_HOME": str(home),
+        "HERMES_DISABLE_LAZY_INSTALLS": "1",
         "HERMES_CONFIG_PATH": str(home / "config.yaml"),
         "HERMES_WEBUI_STATE_DIR": str(home / "webui"),
         "HERMES_WEBUI_AGENT_DIR": str(agent_dir),

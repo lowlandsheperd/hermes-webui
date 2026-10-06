@@ -114,6 +114,25 @@
 
 ### Fixed
 
+- **Typing `/new` and pressing Enter twice quickly starts the new chat.** The first Enter takes `/new` from the
+  slash-command list. When skills couldn't load (for example on a server without an Agent), a skill request that
+  arrived a moment later re-opened the list, so the second Enter picked `/new` again instead of sending it. Picking a
+  command or pressing Escape now keeps the list closed for that text until you type again; a list that is still open
+  picks up late skills as before. This was also the intermittent `/new` failure in the browser-smoke check. (#8063,
+  fixes #8050)
+
+- **Running the test suite on a machine with Hermes Agent installed no longer fills the disk.** Three tests started
+  the server with a minimal environment that dropped `HERMES_DISABLE_LAZY_INSTALLS`, so each one installed a full
+  Agent environment (about 1.1 GB) into its temp folder, about 16 GB per run, and then failed. They now pass the flag,
+  and a test that installs an Agent environment into its temp folder fails with the fix in the message. (#8064)
+
+- **Links next to Chinese/Japanese punctuation end in the right place, and internationalized domains stay whole.** A URL
+  followed by full-width punctuation (`，`, `）`, `。`, opening brackets and quotes) now ends before it, so the prose after
+  it is no longer pulled into the link, while hosts written with the full-width dots (`https://例子。中国`,
+  `https://www。例子.com`, `https://example。рф`, labels with Indic or Thai vowel signs) still link whole and `．`/`｡`
+  inside a path or query no longer cut it short. Long runs of adjacent URLs still render in linear time. Thanks
+  @pxxD1998. (#7979 by @pxxD1998)
+
 - **CLI conversations no longer vanish from the sidebar when a read fails partway.** A read-only `projects.json`
   (for example after a Docker UID mismatch), a locked `state.db` during the cron, webhook, kanban, project-recovery or
   refill reads, or one unavailable profile in the all-profiles view used to throw away every row already loaded, so the

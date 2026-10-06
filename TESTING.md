@@ -2111,8 +2111,9 @@ with that checkout's dependencies installed (`.venv/bin/python` or
 `venv/Scripts/python.exe` are also valid layouts). The WebUI runner still uses
 its own repo `.venv` for pytest; this module does not start the shared WebUI
 HTTP test server. It neither installs Agent dependencies nor
-silently uses that interpreter for the probe. Node must also be on `PATH` for
-the real sidebar checks.
+silently uses that interpreter for the probe. Its subprocess environment sets
+`HERMES_DISABLE_LAZY_INSTALLS=1` so Agent bootstrap cannot install dependencies
+into the disposable home. Node must also be on `PATH` for the real sidebar checks.
 
 Only omitting `HERMES_WEBUI_AGENT_DIR` skips the integration. Once opted in,
 missing or invalid checkout/interpreter settings, missing dependencies, probe
