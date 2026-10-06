@@ -72,10 +72,23 @@ delegate sessions remain nested children. The canonical reset marker is
 require a reset end reason, the same non-empty `session_key`, and finite timestamps
 proving `child.started_at >= parent.ended_at`. Missing or invalid timestamps do
 not establish a legacy reset. The presence of `_branched_from` or `_delegate_from`
-blocks reset classification even if its value is empty; invalid model-config
+blocks reset classification even if its value is empty. A `source=tool` child
+always remains delegated work, even with a matching routing key, timestamps, or
+reset marker. Invalid model-config
 JSON (including excessive nesting) must not abort projection of other sessions.
 Canonical reset boundaries also stop compression traversal so independent
 conversations cannot share a lineage root or produce duplicate sidebar IDs.
+
+**Known upstream ambiguity:** Agent `reopen_session()` can still backfill the
+same `_reset_from` marker onto a markerless legacy branch created before a later
+reset boundary. Its current guard excludes explicit branch/delegate markers and
+tool children, but compares against the parent's start, not its reset boundary.
+After reopening clears the parent's end fields, this row is indistinguishable
+from a genuine historical reset using the fields above. This projection does
+not repair or rewrite that provenance; fixing it requires an Agent-owned durable
+discriminator. The production-composed regression in
+`tests/test_reset_lineage_agent_integration.py` records this remaining expected
+failure; passing ordinary WebUI tests is not evidence that it is resolved.
 
 A WebUI fork's `session_source` can survive compression while its parent link is
 rewritten to an archived snapshot. When state.db confirms a different compression
@@ -105,8 +118,11 @@ uncompressed forks still preserve their explicit fork source and branch indicato
    representative for a lineage should match the target opened by `loadSession()`
    for that lineage during ordinary navigation.
 7. **404 self-heal is separate from lineage resolution.** Missing/deleted sessions
-   should still use the stale-route recovery path. A present archived parent with
-   a live continuation is not a 404; it is a canonicalization problem.
+   should still use the stale-route recovery path. Clear route and localStorage
+   independently only while each still identifies the missing requested ID; a
+   route-only 404 must preserve a different saved ID for the next boot restore.
+   A present archived parent with a live continuation is not a 404; it is a
+   canonicalization problem.
 
 ## Entry Point Matrix
 
