@@ -95,6 +95,11 @@ rewritten to an archived snapshot. When state.db confirms a different compressio
 root, the sidebar response normalizes that continuation's source to WebUI so it
 remains visible. The saved sidecar and original fork snapshot retain provenance;
 uncompressed forks still preserve their explicit fork source and branch indicator.
+Parent-linked fork rows must receive this lineage check even beyond
+`HERMES_WEBUI_LINEAGE_TOP_N`: otherwise a live compressed fork can be nested
+under its hidden archived snapshot and disappear. Ordinary older rows retain
+the configured enrichment cap; this exception changes only read-side projection,
+not the stored sidecar or Agent lineage.
 
 ## Resolution Rules
 

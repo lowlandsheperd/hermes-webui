@@ -2101,20 +2101,39 @@ It does not send platform messages or run a model.
 
 ```bash
 HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent \
+HERMES_WEBUI_PYTHON=/path/to/hermes-agent/venv/bin/python \
   ./scripts/test.sh tests/test_reset_lineage_agent_integration.py -q -rxX
 ```
 
-Current Agent `970ba79fb41c12d2f22a697d2a312efc3fd24f9e` preserves explicit
+Set both variables explicitly. `HERMES_WEBUI_PYTHON` selects the Agent probe's
+interpreter, using the existing runtime override; point it at the environment
+with that checkout's dependencies installed (`.venv/bin/python` or
+`venv/Scripts/python.exe` are also valid layouts). The WebUI runner still uses
+its own repo `.venv` for pytest; this module does not start the shared WebUI
+HTTP test server. It neither installs Agent dependencies nor
+silently uses that interpreter for the probe. Node must also be on `PATH` for
+the real sidebar checks.
+
+Only omitting `HERMES_WEBUI_AGENT_DIR` skips the integration. Once opted in,
+missing or invalid checkout/interpreter settings, missing dependencies, probe
+failures, and invalid probe output are fixture **errors**, not expected failures
+or skips. `tests/test_reset_lineage_agent_fixture.py` runs by default without
+an Agent installation and verifies this distinction against the marked test.
+
+Verified Agent `970ba79fb41c12d2f22a697d2a312efc3fd24f9e` preserves explicit
 branch/delegate/tool children and real reset successors, but still backfills
 `_reset_from` onto a markerless same-key legacy branch in this exact schedule:
 parent starts at 100, branch starts at 150, parent ends as `branched` at 160,
 reopens at 170, ends as `session_switch` at 200, and reopens at 210. WebUI then
 projects that branch as `reset_successor`. This is a **known failing integration
-contract**, represented by one strict xfail; it is not a green release gate.
+contract**, represented by one strict, `AssertionError`-only xfail; it is not a
+green release gate. This full real-Agent check remains opt-in, so default CI
+does not detect an upstream fix by itself.
 Run it without expected-failure handling to see the unresolved assertion:
 
 ```bash
 HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent \
+HERMES_WEBUI_PYTHON=/path/to/hermes-agent/venv/bin/python \
   ./scripts/test.sh tests/test_reset_lineage_agent_integration.py \
   -k markerless_branch --runxfail -q
 ```

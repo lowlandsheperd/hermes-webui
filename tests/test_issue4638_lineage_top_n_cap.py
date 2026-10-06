@@ -9,7 +9,8 @@ covers the visible window while bounding wall-clock. The cap is env-configurable
 
 These tests pin: (1) only the top-N ids are probed when the list exceeds the cap,
 (2) the env override is honored, (3) a non-positive / unparseable cap disables the
-cap (enrich all), (4) lists at/under the cap probe everything.
+cap (enrich all), (4) lists at/under the cap probe everything, and (5) parent-linked
+forks beyond the cap are still normalized because lineage controls visibility.
 """
 from __future__ import annotations
 
@@ -87,3 +88,15 @@ def test_enrichment_failure_is_swallowed(monkeypatch):
     monkeypatch.setattr(models, "_active_state_db_path", lambda: ":memory:")
     # Must not raise.
     models._enrich_sidebar_lineage_metadata(_sessions(10))
+
+
+def test_parent_linked_forks_bypass_cap_without_uncapping_ordinary_rows(monkeypatch):
+    seen = _capture_probed_ids(monkeypatch)
+    monkeypatch.delenv("HERMES_WEBUI_LINEAGE_TOP_N", raising=False)
+    sessions = _sessions(1000)
+    sessions[450].update(session_source="fork", parent_session_id="snapshot")
+    sessions[600].update(session_source=" Fork ", parent_session_id="other-parent")
+    sessions[800].update(session_source="webui", parent_session_id="ordinary-parent")
+    sessions[900].update(session_source="fork")
+    models._enrich_sidebar_lineage_metadata(sessions)
+    assert seen["ids"] == {f"s{i}" for i in range(300)} | {"s450", "s600"}

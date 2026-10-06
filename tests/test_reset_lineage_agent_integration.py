@@ -8,13 +8,18 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 
 import pytest
 
-from tests.test_session_lineage_collapse import render_sidebar_rows
+from tests.test_session_lineage_collapse import NODE, render_sidebar_rows
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(scope="session", autouse=True)
+def test_server():
+    """This module owns its Agent subprocess; it needs no WebUI HTTP server."""
+
 
 # Keep imports inside the subprocess: conftest and neighboring WebUI tests may
 # install lightweight hermes_state stubs, which cannot prove this contract.
@@ -122,10 +127,20 @@ print(json.dumps(results))
 @pytest.fixture(scope="module")
 def real_agent_scenarios(tmp_path_factory):
     configured = os.environ.get("HERMES_WEBUI_AGENT_DIR")
-    if not configured:
+    if configured is None:
         pytest.skip("set HERMES_WEBUI_AGENT_DIR to run the real SessionDB integration")
-    agent_dir = Path(configured).resolve()
-    assert (agent_dir / "hermes_state.py").is_file(), agent_dir
+    agent_dir = Path(configured).expanduser().resolve()
+    if not configured or not (agent_dir / "hermes_state.py").is_file():
+        pytest.fail(f"HERMES_WEBUI_AGENT_DIR must contain hermes_state.py: {agent_dir}")
+    # The suite's interpreter need not have Agent dependencies. Require the
+    # existing explicit runtime override rather than silently reusing it.
+    configured_python = os.environ.get("HERMES_WEBUI_PYTHON")
+    if not configured_python:
+        pytest.fail("set HERMES_WEBUI_PYTHON to the Agent environment's Python executable")
+    # Keep venv symlinks intact; resolving bin/python can escape its environment.
+    agent_python = Path(configured_python).expanduser().absolute()
+    if not agent_python.is_file():
+        pytest.fail(f"HERMES_WEBUI_PYTHON is not a Python executable: {agent_python}")
     home = tmp_path_factory.mktemp("real-agent-reset")
     # Allow no credentials, inherited config or existing user state into Agent.
     env = {
@@ -135,14 +150,29 @@ def real_agent_scenarios(tmp_path_factory):
         "HERMES_BASE_HOME": str(home),
         "HERMES_CONFIG_PATH": str(home / "config.yaml"),
         "HERMES_WEBUI_STATE_DIR": str(home / "webui"),
+        "HERMES_WEBUI_AGENT_DIR": str(agent_dir),
+        "HERMES_WEBUI_PYTHON": str(agent_python),
         "PYTHONPATH": os.pathsep.join((str(agent_dir), str(ROOT))),
     }
-    result = subprocess.run(
-        [sys.executable, "-c", PROBE, str(home)],
-        cwd=ROOT, env=env, capture_output=True, text=True, timeout=90,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    return json.loads(result.stdout)
+    try:
+        result = subprocess.run(
+            [str(agent_python), "-c", PROBE, str(home)],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=90,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        pytest.fail(f"real Agent probe could not run with {agent_python}: {exc}")
+    if result.returncode != 0:
+        pytest.fail(
+            f"real Agent probe failed with {agent_python} (exit {result.returncode}):\n"
+            + result.stdout + result.stderr
+        )
+    try:
+        scenarios = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        pytest.fail(f"real Agent probe returned invalid JSON: {exc}\n" + result.stdout + result.stderr)
+    if NODE is None:
+        pytest.fail("node must be on PATH for the opted-in real Agent sidebar integration")
+    return scenarios
 
 
 def _assert_child_projection(observation):
@@ -178,6 +208,7 @@ def test_real_reset_stays_independent_after_parent_reopen(real_agent_scenarios, 
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="Agent reopen_session backfills creation-authority _reset_from onto markerless legacy branches",
 )
 def test_real_agent_markerless_branch_survives_later_reset_boundary(real_agent_scenarios):

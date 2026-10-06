@@ -1722,3 +1722,55 @@ def test_reset_metadata_never_promotes_tool_child(_isolate, canonical):
         assert [row["session_id"] for row in report["children"]] == ["tool_reset_child"]
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("newer_count", [5, 300, 400])
+def test_compressed_fork_beyond_lineage_cap_remains_visible(_isolate, monkeypatch, newer_count):
+    """A retained fork source must not hide a live tip under its archived snapshot.
+
+    Bind the gate's 300/400-row reproduction to the real payload builder and
+    production JS grouping. Newer ordinary rows consume the default lineage cap.
+    """
+    monkeypatch.delenv("HERMES_WEBUI_LINEAGE_TOP_N", raising=False)
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 1000
+    parent_id, tip_id = "old_fork_snapshot", "old_fork_live_tip"
+    try:
+        snapshot = _save_webui_session(parent_id, title="Fork snapshot", updated_at=t0)
+        snapshot.archived = True
+        snapshot.pre_compression_snapshot = True
+        snapshot.session_source = "fork"
+        snapshot.parent_session_id = "original-fork-parent"
+        snapshot.save(touch_updated_at=False)
+        tip = _save_webui_session(tip_id, title="Live compressed fork", updated_at=t0 + 10)
+        tip.session_source = "fork"
+        tip.parent_session_id = parent_id
+        tip.save(touch_updated_at=False)
+        _insert_state_row(conn, parent_id, started_at=t0, ended_at=t0 + 5, end_reason="compression")
+        _insert_state_row(conn, tip_id, started_at=t0 + 6, parent=parent_id)
+        for i in range(newer_count):
+            _save_webui_session(f"newer_{i}", title=f"Newer conversation {i}", updated_at=t0 + 20 + i)
+
+        monkeypatch.setattr(routes, "all_sessions", models.all_sessions)
+        monkeypatch.setattr(routes, "_enrich_sidebar_lineage_metadata", models._enrich_sidebar_lineage_metadata)
+        monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _rows: False)
+        args = dict(active_profile="default", all_profiles=False, show_cli_sessions=False,
+                    show_previous_messaging_sessions=False, show_cron_sessions=False)
+        payload = routes._build_session_list_cache_payload(**args, include_archived=False)
+        references = routes._build_session_list_cache_payload(**args, include_archived=True)
+        assert len(payload["sessions"]) == newer_count + 1
+        assert payload["sessions"][-1]["session_id"] == tip_id
+        assert payload["archived_count"] == 1
+        visible = render_sidebar_rows(payload["sessions"], references["sessions"])
+        assert tip_id in {row["session_id"] for row in visible}
+        assert parent_id not in {row["session_id"] for row in visible}
+        projected_tip = next(row for row in payload["sessions"] if row["session_id"] == tip_id)
+        assert projected_tip["session_source"] == "webui"
+        assert projected_tip["_lineage_root_id"] == parent_id
+        assert projected_tip["parent_session_id"] == parent_id
+        # Projection never overwrites original fork or compression provenance.
+        for sid in (parent_id, tip_id):
+            saved = json.loads((models.SESSION_DIR / f"{sid}.json").read_text())
+            assert saved["session_source"] == "fork"
+    finally:
+        conn.close()

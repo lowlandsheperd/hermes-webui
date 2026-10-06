@@ -7080,11 +7080,12 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
 
     Cap the DB lookup to the top-N most recent sessions to bound wall-clock
     on power users with thousands of sessions. The sidebar paints chronologically
-    newest first; older sessions almost never have visible lineage to collapse
-    (parents are themselves stale and rarely surface in the same render).
-    Lineage enrichment for those is loaded lazily when the user opens the
-    history panel. Issue #38914 / 2026-06-21 triage: /api/sessions was spending
-    4.9s on lineage_metadata across 2400+ rows.
+    newest first; ordinary older rows are enriched lazily when the user opens
+    the history panel. Parent-linked forks are an exception: compression can
+    leave a fork source pointing at an archived snapshot, so their lineage
+    affects visibility even outside the paint-priority window.
+    Issue #38914 / 2026-06-21 triage: /api/sessions was spending 4.9s on
+    lineage_metadata across 2400+ rows.
     """
     # 2026-06-21: configurable via env to ease A/B and rollback without a redeploy.
     import os as _os
@@ -7093,7 +7094,11 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     except (TypeError, ValueError):
         _cap = 300
     if _cap > 0 and len(sessions) > _cap:
-        candidates = sessions[:_cap]
+        candidates = sessions[:_cap] + [
+            session for session in sessions[_cap:]
+            if str(session.get('session_source') or '').strip().lower() == 'fork'
+            and str(session.get('parent_session_id') or '').strip()
+        ]
     else:
         candidates = sessions
     try:
