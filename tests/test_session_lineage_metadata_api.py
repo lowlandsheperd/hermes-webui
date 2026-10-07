@@ -596,8 +596,8 @@ def test_state_db_webui_source_overrides_stale_cli_json_metadata(_isolate):
         conn.close()
 
 
-def test_state_db_webui_source_preserves_explicit_sidecar_fork_metadata(_isolate):
-    """A generic WebUI mirror must not erase sidecar fork provenance."""
+def test_state_db_webui_source_normalizes_projection_without_rewriting_fork(_isolate):
+    """Used branches remain independent; durable sidecar provenance is unchanged."""
     conn = _ensure_state_db(_isolate)
     t0 = time.time() - 100
     try:
@@ -619,7 +619,11 @@ def test_state_db_webui_source_preserves_explicit_sidecar_fork_metadata(_isolate
 
         row = {row['session_id']: row for row in all_sessions()}['lineage_api_native_fork_source']
 
-        assert row['session_source'] == 'fork'
+        assert row['session_source'] == 'webui'
+        assert row['parent_session_id'] == 'lineage_api_fork_parent'
+        saved = json.loads((models.SESSION_DIR / f'{session.session_id}.json').read_text())
+        assert saved['session_source'] == 'fork'
+        assert saved['parent_session_id'] == 'lineage_api_fork_parent'
         assert row['source_tag'] == 'webui'
         assert row['raw_source'] == 'webui'
         assert row['source_label'] == 'WebUI'
@@ -970,7 +974,7 @@ def test_sessions_route_preserves_visible_child_lineage_when_archived_parent_fil
         )
 
         assert [row["session_id"] for row in default_payload["sessions"]] == ["lineage_api_visible_tip"]
-        assert default_payload["archived_count"] == 1
+        assert default_payload["archived_count"] == (0 if session_source == "fork" else 1)
         tip = default_payload["sessions"][0]
         assert tip.get("parent_session_id") == "lineage_api_archived_parent"
         assert tip.get("_lineage_root_id") == "lineage_api_archived_parent"
@@ -986,12 +990,12 @@ def test_sessions_route_preserves_visible_child_lineage_when_archived_parent_fil
             show_cron_sessions=False,
             include_archived=True,
         )
-        assert [row["session_id"] for row in archived_payload["sessions"]] == [
-            "lineage_api_visible_tip",
-            "lineage_api_archived_parent",
-        ]
-        if session_source == 'fork':
-            assert archived_payload['sessions'][1]['session_source'] == 'fork'
+        expected_ids = ["lineage_api_visible_tip"]
+        if session_source != "fork":
+            expected_ids.append("lineage_api_archived_parent")
+        # A normalized compression snapshot follows the existing hidden-snapshot
+        # rule; an ordinary archived parent remains available in the archive list.
+        assert [row["session_id"] for row in archived_payload["sessions"]] == expected_ids
         visible_rows = render_sidebar_rows(default_payload['sessions'], archived_payload['sessions'])
         assert [row['session_id'] for row in visible_rows] == ['lineage_api_visible_tip']
         assert visible_rows[0]['_lineage_root_id'] == 'lineage_api_archived_parent'
@@ -1731,18 +1735,23 @@ def test_compressed_fork_beyond_lineage_cap_remains_visible(_isolate, monkeypatc
     Bind the gate's 300/400-row reproduction to the real payload builder and
     production JS grouping. Newer ordinary rows consume the default lineage cap.
     """
+    from urllib.parse import urlparse
+    from tests.test_465_session_branching import _FakeHandler, _capture_route
+
     monkeypatch.delenv("HERMES_WEBUI_LINEAGE_TOP_N", raising=False)
     conn = _ensure_state_db(_isolate)
     t0 = time.time() - 1000
     parent_id, tip_id = "old_fork_snapshot", "old_fork_live_tip"
     try:
         snapshot = _save_webui_session(parent_id, title="Fork snapshot", updated_at=t0)
+        snapshot.messages[0]["content"] = "shared inherited discussion"
         snapshot.archived = True
         snapshot.pre_compression_snapshot = True
         snapshot.session_source = "fork"
         snapshot.parent_session_id = "original-fork-parent"
         snapshot.save(touch_updated_at=False)
         tip = _save_webui_session(tip_id, title="Live compressed fork", updated_at=t0 + 10)
+        tip.messages[0]["content"] = "shared inherited discussion"
         tip.session_source = "fork"
         tip.parent_session_id = parent_id
         tip.save(touch_updated_at=False)
@@ -1760,17 +1769,121 @@ def test_compressed_fork_beyond_lineage_cap_remains_visible(_isolate, monkeypatc
         references = routes._build_session_list_cache_payload(**args, include_archived=True)
         assert len(payload["sessions"]) == newer_count + 1
         assert payload["sessions"][-1]["session_id"] == tip_id
-        assert payload["archived_count"] == 1
+        assert payload["archived_count"] == 0  # compression snapshot stays hidden
         visible = render_sidebar_rows(payload["sessions"], references["sessions"])
         assert tip_id in {row["session_id"] for row in visible}
         assert parent_id not in {row["session_id"] for row in visible}
         projected_tip = next(row for row in payload["sessions"] if row["session_id"] == tip_id)
         assert projected_tip["session_source"] == "webui"
-        assert projected_tip["_lineage_root_id"] == parent_id
+        if newer_count < 300:
+            assert projected_tip["_lineage_root_id"] == parent_id
+        else:
+            assert "_lineage_root_id" not in projected_tip
         assert projected_tip["parent_session_id"] == parent_id
+        # Content-only search uses a separate API projection. Its hits are merged
+        # by the real client before grouping, so list visibility alone is not enough.
+        response = _capture_route(monkeypatch)
+        monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "default")
+        routes._handle_sessions_search(
+            _FakeHandler(),
+            urlparse("/api/sessions/search?q=shared+inherited+discussion&content=1&depth=0"),
+        )
+        assert response["status"] == 200
+        hits = response["ok"]["sessions"]
+        assert tip_id in {row["session_id"] for row in hits}
+        assert all(row["match_type"] == "content" for row in hits)
+        for search_references in (references["sessions"], hits):
+            visible_hits = render_sidebar_rows(
+                payload["sessions"], search_references,
+                query="shared inherited discussion", content_matches=hits,
+            )
+            assert tip_id in {row["session_id"] for row in visible_hits}
+            assert parent_id not in {row["session_id"] for row in visible_hits}
         # Projection never overwrites original fork or compression provenance.
         for sid in (parent_id, tip_id):
             saved = json.loads((models.SESSION_DIR / f"{sid}.json").read_text())
             assert saved["session_source"] == "fork"
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("parent_archived", [False, True])
+@pytest.mark.parametrize("show_archived", [False, True])
+@pytest.mark.parametrize("search", ["", "title", "id", "link", "content"])
+@pytest.mark.parametrize("lineage_cap", [300, 1])
+def test_used_branch_stays_visible_after_original_archived(
+    _isolate, monkeypatch, parent_archived, show_archived, search, lineage_cap,
+):
+    """Branch/Archive handlers feed the real payload and production search/grouping."""
+    from urllib.parse import urlparse
+    from tests.test_465_session_branching import _FakeHandler, _capture_route
+
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    parent = _save_webui_session("used_branch_original", title="Original discussion", updated_at=time.time() - 20)
+    monkeypatch.setenv("HERMES_WEBUI_LINEAGE_TOP_N", str(lineage_cap))
+    _save_webui_session("newer_unrelated", title="Unrelated conversation", updated_at=time.time() + 60)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {})
+    monkeypatch.setattr(routes, "all_sessions", models.all_sessions)
+    monkeypatch.setattr(routes, "_enrich_sidebar_lineage_metadata", models._enrich_sidebar_lineage_metadata)
+    monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _rows: False)
+    response = _capture_route(monkeypatch)
+    body = {"session_id": parent.session_id, "title": "Independent branch discussion"}
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    try:
+        routes.handle_post(_FakeHandler(), urlparse("/api/session/branch"))
+        assert "bad" not in response, response
+        branch_id = response["ok"]["session_id"]
+        branch = models.get_session(branch_id)
+        assert branch.parent_session_id == parent.session_id
+        assert branch.session_source == "fork"
+        # Model the first submitted turn's sidecar and plain WebUI state.db mirror.
+        # Branch creation itself does not put the sidecar parent into that row.
+        branch.messages.append({"role": "user", "content": "Continue only in this branch"})
+        branch.save()
+        _insert_state_row(conn, branch_id, source="webui", started_at=time.time())
+        for index, message in enumerate(branch.messages):
+            _insert_state_message(conn, branch_id, role=message["role"],
+                                  content=message["content"], timestamp=time.time() + index)
+        if parent_archived:
+            body = {"session_id": parent.session_id, "archived": True}
+            response.clear()
+            routes.handle_post(_FakeHandler(), urlparse("/api/session/archive"))
+            assert response["ok"]["session"]["archived"] is True
+        before = (models.SESSION_DIR / f"{branch_id}.json").read_bytes()
+        payload = routes._build_session_list_cache_payload(
+            active_profile="default", all_profiles=False, show_cli_sessions=False,
+            show_previous_messaging_sessions=False, show_cron_sessions=False,
+            include_archived=show_archived,
+        )
+        query = {"": "", "title": branch.title, "id": branch_id,
+                 "link": f"http://webui.local/session/{branch_id}",
+                 "content": "Continue only in this branch"}[search]
+        hits = []
+        if search == "content":
+            monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "default")
+            response.clear()
+            routes._handle_sessions_search(
+                _FakeHandler(),
+                urlparse("/api/sessions/search?q=Continue+only+in+this+branch&content=1&depth=0"),
+            )
+            assert response["status"] == 200
+            hits = response["ok"]["sessions"]
+            assert {row["session_id"] for row in hits} == {branch_id}
+        visible = render_sidebar_rows(
+            payload["sessions"],
+            [*(hits if search == "content" else payload["sessions"]),
+             *payload.get("sidebar_reference_sessions", [])],
+            query=query, show_archived=show_archived, include_indicators=True,
+            content_matches=hits,
+        )
+        assert branch_id in {row["session_id"] for row in visible}
+        rendered_branch = next(row for row in visible if row["session_id"] == branch_id)
+        assert rendered_branch["parent_session_id"] == parent.session_id
+        assert rendered_branch["_test_branch_indicator"] is True
+        assert rendered_branch.get("relationship_type") != "reset_successor"
+        assert (models.SESSION_DIR / f"{branch_id}.json").read_bytes() == before
+        assert json.loads(before)["session_source"] == "fork"
     finally:
         conn.close()

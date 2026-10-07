@@ -31,7 +31,9 @@ def _run_node(source: str) -> str:
     return result.stdout.strip()
 
 
-def render_sidebar_rows(sessions, references):
+def render_sidebar_rows(
+    sessions, references, *, query="", show_archived=False, include_indicators=False, content_matches=(),
+):
     """Run production sidebar grouping on API rows, including hidden ancestors."""
     if NODE is None:
         pytest.skip('node not on PATH')
@@ -48,12 +50,26 @@ function extractFunc(name) {{
   }}
   return src.slice(start, i);
 }}
+const _showArchived = {json.dumps(show_archived)};
 for (const name of ['_sessionTimestampMs', '_isChildSession',
+  '_sessionDisplayTitle', '_sessionSearchAddIdCandidate', '_sessionSearchCleanUrlToken',
+  '_sessionSearchSessionIdCandidates', '_sessionSearchDirectSessionMatches',
+  '_sessionSearchDirectAndTitleMatches', '_sessionSearchMergeMatches',
   '_isForkWithResolvableParent', '_sessionLineageKey', '_sidebarLineageKeyForRow',
   '_collapseSessionLineageForSidebar', '_attachChildSessionsToSidebarRows',
   '_renderSidebarRowsFromRawSessions']) eval(extractFunc(name));
-console.log(JSON.stringify(_renderSidebarRowsFromRawSessions(
-  {json.dumps(sessions)}, {json.dumps(references)})));
+const matched = _sessionSearchMergeMatches(
+  {json.dumps(sessions)}, {json.dumps(query)}, {json.dumps(content_matches)});
+// Mirror _partitionSidebarSessionRows: archived matches remain reference rows
+// but cannot render when Show archived is off.
+let rows = _renderSidebarRowsFromRawSessions(
+  matched.filter(row => _showArchived || !row.archived), {json.dumps(references)});
+if ({json.dumps(include_indicators)}) {{
+  eval(extractFunc('_isResetSuccessor'));
+  eval(extractFunc('_showsForkOrBranchIndicator'));
+  rows = rows.map(row => ({{...row, _test_branch_indicator: _showsForkOrBranchIndicator(row)}}));
+}}
+console.log(JSON.stringify(rows));
 """))
 
 

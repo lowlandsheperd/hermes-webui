@@ -6986,30 +6986,9 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
         state_db_last_message_at = entry.pop('_state_db_last_message_at', None)
         state_db_display_title = entry.pop('_state_db_display_title', None)
         if state_db_source in ('webui', 'subagent'):
-            # A WebUI-native /branch sidecar is the authoritative source for
-            # fork provenance. Its mirrored state.db row is intentionally
-            # generic ``source='webui'`` and cannot represent that distinction.
-            # Preserve the explicit marker when it has the required parent;
-            # otherwise keep the authoritative state.db normalization behavior,
-            # including delegated subagent classification.
-            # Compression inherits session_source but rewrites the parent link
-            # to a snapshot. Once state.db confirms that continuation, do not
-            # present this link as a fork of its own archived ancestor (#7179).
-            is_compression_continuation = bool(
-                entry.get('_lineage_root_id')
-                and entry['_lineage_root_id'] != sid
-            )
-            preserve_native_fork = bool(
-                state_db_source == 'webui'
-                and str(session.get('session_source') or '').strip().lower() == 'fork'
-                and str(session.get('parent_session_id') or '').strip()
-                and not is_compression_continuation
-            )
             session['source_tag'] = state_db_source_tag
             session['raw_source'] = state_db_raw_source
-            session['session_source'] = (
-                'fork' if preserve_native_fork else state_db_session_source
-            )
+            session['session_source'] = state_db_session_source
             session['source_label'] = state_db_source_label
             session['is_cli_session'] = False
             if state_db_source == 'subagent':
@@ -7080,12 +7059,11 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
 
     Cap the DB lookup to the top-N most recent sessions to bound wall-clock
     on power users with thousands of sessions. The sidebar paints chronologically
-    newest first; ordinary older rows are enriched lazily when the user opens
-    the history panel. Parent-linked forks are an exception: compression can
-    leave a fork source pointing at an archived snapshot, so their lineage
-    affects visibility even outside the paint-priority window.
-    Issue #38914 / 2026-06-21 triage: /api/sessions was spending 4.9s on
-    lineage_metadata across 2400+ rows.
+    newest first; older sessions almost never have visible lineage to collapse
+    (parents are themselves stale and rarely surface in the same render).
+    Lineage enrichment for those is loaded lazily when the user opens the
+    history panel. Issue #38914 / 2026-06-21 triage: /api/sessions was spending
+    4.9s on lineage_metadata across 2400+ rows.
     """
     # 2026-06-21: configurable via env to ease A/B and rollback without a redeploy.
     import os as _os
@@ -7094,11 +7072,26 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     except (TypeError, ValueError):
         _cap = 300
     if _cap > 0 and len(sessions) > _cap:
-        candidates = sessions[:_cap] + [
-            session for session in sessions[_cap:]
-            if str(session.get('session_source') or '').strip().lower() == 'fork'
-            and str(session.get('parent_session_id') or '').strip()
-        ]
+        candidates = sessions[:_cap]
+        # Content search uses all_sessions() without the list route's uncapped
+        # source overlay. Normalize old mirrored forks before sidebar hiding,
+        # but do not expand lineage traversal or message aggregation past the cap.
+        fork_ids = {
+            str(s['session_id']) for s in sessions[_cap:]
+            if s.get('session_id') and str(s.get('session_source') or '').strip().lower() == 'fork'
+        }
+        if fork_ids:
+            try:
+                source_metadata = _read_state_db_sidebar_overrides(
+                    _active_state_db_path(), fork_ids, count_session_ids=set(),
+                )
+                # The cheap sessions-table read also returns its message_count.
+                # Keep this fallback source/title-only, including for stale rows.
+                for entry in source_metadata.values():
+                    entry.pop('_state_db_message_count', None)
+                _apply_sidebar_state_db_override_metadata(sessions, source_metadata)
+            except Exception:
+                logger.debug("Failed to normalize old sidebar fork sources")
     else:
         candidates = sessions
     try:

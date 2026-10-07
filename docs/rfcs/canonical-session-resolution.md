@@ -90,16 +90,16 @@ discriminator. The production-composed regression in
 `tests/test_reset_lineage_agent_integration.py` records this remaining expected
 failure; passing ordinary WebUI tests is not evidence that it is resolved.
 
-A WebUI fork's `session_source` can survive compression while its parent link is
-rewritten to an archived snapshot. When state.db confirms a different compression
-root, the sidebar response normalizes that continuation's source to WebUI so it
-remains visible. The saved sidecar and original fork snapshot retain provenance;
-uncompressed forks still preserve their explicit fork source and branch indicator.
-Parent-linked fork rows must receive this lineage check even beyond
-`HERMES_WEBUI_LINEAGE_TOP_N`: otherwise a live compressed fork can be nested
-under its hidden archived snapshot and disappear. Ordinary older rows retain
-the configured enrichment cap; this exception changes only read-side projection,
-not the stored sidecar or Agent lineage.
+Sidebar source reconciliation keeps the state.db source authoritative for used
+WebUI branches. A plain `source='webui'` mirror must normalize the response to
+WebUI even if its sidecar still says `fork`; otherwise archiving the original
+can hide an independent, used branch. The retained `parent_session_id` drives
+its branch indicator independently of source. This does not rewrite the saved
+sidecar, remove Agent `child_session` relationships, or change unmirrored fork
+archive behavior. Source reconciliation remains uncapped in the session-list
+route. Other callers, including content search, also normalize beyond-cap fork
+sources through a cheap sessions-table lookup with no message aggregation or
+count overlay. Lineage enrichment keeps its configured top-N limit.
 
 ## Resolution Rules
 
